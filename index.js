@@ -88,8 +88,9 @@ apiRouter.post('/tts', async (req, res, next) => {
 
 app.use('/api', apiRouter);
 
-// --- 新增：聊天上下文缓存 ---
-const chatHistories = new Map(); // chatId => [{role: 'user'|'model', text: string}]
+// ========== Telegram Bot Section ==========
+
+const chatHistories = new Map();
 
 async function apiRequest(botToken, methodName, params = {}) {
     const url = `https://api.telegram.org/bot${botToken}/${methodName}`;
@@ -136,7 +137,17 @@ app.post('/', async (req, res) => {
             if (text.startsWith('/start') || text.startsWith('/help')) {
                 return await apiRequest(botToken, 'sendMessage', {
                     chat_id: chatId,
-                    text: "欢迎使用！可使用命令：\n/translate 文本 - 翻译\n/tts 文本 - 语音合成\n\n直接提问开启对话\n用 /reset 清除上下文"
+                    text: `🤖 欢迎使用 SpeakMate AI 机器人！
+
+我可以执行以下任务：
+
+🧠 多轮 AI 聊天（具备上下文记忆）
+🌐 文本翻译：/translate <文本>
+🔊 文本转语音：/tts <文本>
+🎙️ 语音识别：发送语音消息即可识别为文字
+🧹 清除聊天上下文：/reset
+
+直接输入你的问题即可开始聊天！`
                 });
             }
 
@@ -193,7 +204,6 @@ app.post('/', async (req, res) => {
                 return;
             }
 
-            // 🧠 默认：开启 Gemini 对话（带上下文）
             await apiRequest(botToken, 'sendChatAction', { chat_id: chatId, action: 'typing' });
 
             const history = chatHistories.get(chatId) || [];
@@ -207,7 +217,6 @@ app.post('/', async (req, res) => {
 
             await apiRequest(botToken, 'sendMessage', { chat_id: chatId, text: reply });
 
-            // 更新历史，保留最后 10 轮（20 条）
             const updatedHistory = [...history, { role: 'user', text }, { role: 'model', text: reply }];
             chatHistories.set(chatId, updatedHistory.slice(-20));
         }
