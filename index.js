@@ -2,39 +2,37 @@ const express = require('express');
 const { TranslationServiceClient } = require('@google-cloud/translate');
 const { SpeechClient } = require('@google-cloud/speech');
 const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
-const { GoogleGenerativeAI } = require('@google/genai');
+const { VertexAI } = require('@google-cloud/vertex-ai');
 const FormData = require('form-data');
 const fetch = require('node-fetch');
 
 const app = express();
 const port = process.env.PORT || 8080;
 const projectId = process.env.GCLOUD_PROJECT;
+const region = 'us-central1';
 
 // 初始化Google Cloud客户端
 const translationClient = new TranslationServiceClient();
 const speechClient = new SpeechClient();
 const ttsClient = new TextToSpeechClient();
+const vertex_ai = new VertexAI({ project: projectId, location: region });
 
-// 初始化新的GenAI客户端
-let genAI;
+// 对于新项目，使用兼容性更好的模型
 let geminiModel;
-
 try {
-    genAI = new GoogleGenerativeAI({
-        projectId: projectId,
-        location: 'us-central1', // 或者您偏好的区域
-        apiKey: process.env.GOOGLE_API_KEY // 如果使用API密钥
-    });
-    
-    // 使用稳定的Gemini模型
-    geminiModel = genAI.getGenerativeModel({ 
-        model: 'gemini-1.0-pro' // 使用兼容性更好的模型
-    });
-    
-    log('info', 'Google GenAI client initialized successfully');
+    // 新项目建议使用 gemini-1.0-pro，兼容性更好
+    geminiModel = vertex_ai.getGenerativeModel({ model: 'gemini-1.0-pro' });
+    log('info', 'Using Gemini 1.0 Pro model (recommended for new projects)');
 } catch (error) {
-    log('error', 'Failed to initialize Google GenAI client', error);
-    geminiModel = null;
+    log('warn', 'Failed to initialize Gemini 1.0 Pro, trying fallback', error);
+    try {
+        // 回退到基础模型
+        geminiModel = vertex_ai.getGenerativeModel({ model: 'gemini-pro' });
+        log('info', 'Using basic Gemini Pro model');
+    } catch (fallbackError) {
+        log('error', 'Failed to initialize any Gemini model', fallbackError);
+        geminiModel = null; // 标记为不可用
+    }
 }
 
 // 中间件设置
@@ -146,6 +144,7 @@ async function handleVoiceMessage(botToken, message) {
         
     } catch (error) {
         log('error', `Voice processing error for chat ${chatId}`, error);
+        // 异步发送错误消息，不阻塞主流程
         setImmediate(() => {
             safeSendMessage(botToken, chatId, `❌ 语音识别失败：${error.message}`);
         });
@@ -233,7 +232,7 @@ async function handleAIChat(botToken, chatId, text) {
     if (!geminiModel) {
         log('error', `Gemini model not available for chat ${chatId}`);
         setImmediate(() => {
-            safeSendMessage(botToken, chatId, '❌ AI聊天功能暂时不可用，模型初始化失败。\n\n请检查环境变量配置和API启用状态。');
+            safeSendMessage(botToken, chatId, '❌ AI聊天功能暂时不可用，模型初始化失败。\n\n这可能是因为项目为新项目，需要等待Vertex AI服务完全激活。');
         });
         return;
     }
@@ -242,26 +241,16 @@ async function handleAIChat(botToken, chatId, text) {
         await apiRequest(botToken, 'sendChatAction', { chat_id: chatId, action: 'typing' });
 
         const history = chatHistories.get(chatId) || [];
-        
-        // 构建聊天历史（新SDK格式）
-        const chatHistory = history.map(h => ({
-            role: h.role === 'model' ? 'model' : 'user',
+        const contents = history.map(h => ({
+            role: h.role,
             parts: [{ text: h.text }]
-        }));
+        })).concat([{ role: 'user', parts: [{ text }] }]);
 
         log('debug', `AI chat history length: ${history.length}`);
+        log('debug', `Using project: ${projectId}, region: ${region}`);
         
-        // 使用新的API格式
-        const chat = geminiModel.startChat({
-            history: chatHistory,
-            generationConfig: {
-                maxOutputTokens: 1000,
-                temperature: 0.7,
-            },
-        });
-
-        const result = await chat.sendMessage(text);
-        const reply = result.response.text() || '抱歉，我无法生成回复。';
+        const result = await geminiModel.generateContent({ contents });
+        const reply = result.response?.candidates?.[0]?.content?.parts?.[0]?.text || '抱歉，我无法生成回复。';
 
         await apiRequest(botToken, 'sendMessage', { chat_id: chatId, text: reply });
 
@@ -278,17 +267,15 @@ async function handleAIChat(botToken, chatId, text) {
         let errorMessage = '❌ AI聊天暂时不可用';
         
         if (error.message?.includes('403') || error.message?.includes('SERVICE_DISABLED')) {
-            errorMessage += '\n\n🔧 **配置检查**：\n' +
-                           '• 确保Vertex AI API已启用\n' +
-                           '• 检查服务账号权限\n' +
-                           '• 验证项目绑定付款方式\n' +
-                           '• 新项目可能需要24-48小时激活\n\n' +
-                           '💡 **临时解决方案**：\n' +
-                           '• 尝试使用其他功能（翻译、语音识别等）';
+            errorMessage += '\n\n🆕 **新项目常见问题**：\n' +
+                           '• 新项目的Vertex AI可能需要24-48小时才能完全激活\n' +
+                           '• 建议等待一段时间后重试\n' +
+                           '• 或者尝试使用其他功能（翻译、语音识别等）\n\n' +
+                           '📝 如果问题持续，请检查：\n' +
+                           '• Google Cloud控制台中Vertex AI API是否启用\n' +
+                           '• 项目是否绑定了有效的付款方式';
         } else if (error.message?.includes('quota')) {
             errorMessage += '\n\n📊 配额不足，请稍后重试或检查配额设置。';
-        } else if (error.message?.includes('model')) {
-            errorMessage += '\n\n🤖 模型不可用，可能是新项目限制或模型版本问题。';
         } else {
             errorMessage += `\n\n🔍 错误详情：${error.message}`;
         }
@@ -359,9 +346,7 @@ app.post('/', async (req, res) => {
 🧹 **清除聊天记录**：/reset
 
 直接输入你的问题即可开始聊天！
-或尝试发送语音消息来测试语音识别功能。
-
-🔧 **版本信息**：v1.2.0 - 使用最新Google GenAI SDK`);
+或尝试发送语音消息来测试语音识别功能。`);
                     return;
                 }
 
@@ -404,13 +389,12 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         memoryUsage: process.memoryUsage(),
-        version: '1.2.0',
+        version: process.env.npm_package_version || '1.1.0',
         chatHistories: chatHistories.size,
         environment: {
             nodeVersion: process.version,
             projectId: projectId || 'not-set',
-            botTokenConfigured: !!process.env.TELEGRAM_BOT_TOKEN,
-            geminiModelAvailable: !!geminiModel
+            botTokenConfigured: !!process.env.TELEGRAM_BOT_TOKEN
         }
     };
     
@@ -439,7 +423,6 @@ app.listen(port, () => {
     log('info', `Server running on port ${port}`);
     log('info', `Project ID: ${projectId || 'not-set'}`);
     log('info', `Bot Token configured: ${!!process.env.TELEGRAM_BOT_TOKEN}`);
-    log('info', `Gemini Model available: ${!!geminiModel}`);
     log('info', `Node.js version: ${process.version}`);
     log('info', `Memory usage:`, process.memoryUsage());
 });
