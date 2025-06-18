@@ -6,12 +6,12 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@google-cloud/translate": "^8.2.0",      // Latest as of now
-    "@google-cloud/speech": "^6.4.0",         // Latest as of now
-    "@google-cloud/text-to-speech": "^5.2.0",  // Latest as of now
-    "@google-cloud/vertex-ai": "^1.2.0",      // CRITICAL FIX: Updated to latest stable version
+    "@google-cloud/translate": "^8.2.0",
+    "@google-cloud/speech": "^6.4.0",
+    "@google-cloud/text-to-speech": "^5.2.0",
+    "@google-cloud/vertex-ai": "^1.2.0",
     "express": "^4.18.2",
     "form-data": "^4.0.0",
-    "node-fetch": "^2.7.0"                    // Still needed for form-data with fetch
+    "node-fetch": "^2.7.0"
   }
 }
