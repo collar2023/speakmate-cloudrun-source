@@ -2,38 +2,22 @@ const express = require('express');
 const { TranslationServiceClient } = require('@google-cloud/translate');
 const { SpeechClient } = require('@google-cloud/speech');
 const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
-const { VertexAI } = require('@google-cloud/vertex-ai');
 const FormData = require('form-data');
 const fetch = require('node-fetch');
 
 const app = express();
 const port = process.env.PORT || 8080;
 const projectId = process.env.GCLOUD_PROJECT;
-const region = 'us-central1';
 
-// 初始化Google Cloud客户端
+// 初始化Google Cloud客户端（保持服务账号认证）
 const translationClient = new TranslationServiceClient();
 const speechClient = new SpeechClient();
 const ttsClient = new TextToSpeechClient();
-const vertex_ai = new VertexAI({ project: projectId, location: region });
 
-// 对于新项目，使用兼容性更好的模型
-let geminiModel;
-try {
-    // 新项目建议使用 gemini-1.0-pro，兼容性更好
-    geminiModel = vertex_ai.getGenerativeModel({ model: 'gemini-1.0-pro' });
-    log('info', 'Using Gemini 1.0 Pro model (recommended for new projects)');
-} catch (error) {
-    log('warn', 'Failed to initialize Gemini 1.0 Pro, trying fallback', error);
-    try {
-        // 回退到基础模型
-        geminiModel = vertex_ai.getGenerativeModel({ model: 'gemini-pro' });
-        log('info', 'Using basic Gemini Pro model');
-    } catch (fallbackError) {
-        log('error', 'Failed to initialize any Gemini model', fallbackError);
-        geminiModel = null; // 标记为不可用
-    }
-}
+// Google AI Studio API 配置
+const GOOGLE_AI_API_KEY = process.env.GOOGLE_AI_API_KEY;
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_MODEL = 'gemini-2.0-flash'; // 使用你提到的最新模型
 
 // 中间件设置
 app.use(express.json({ limit: '10mb' }));
@@ -50,6 +34,147 @@ function log(level, message, data = null) {
         console.log(logEntry, data);
     } else {
         console.log(logEntry);
+    }
+}
+
+// 环境变量验证函数
+function validateEnvironment() {
+    const required = ['TELEGRAM_BOT_TOKEN', 'GCLOUD_PROJECT'];
+    const missing = required.filter(key => !process.env[key]);
+    
+    if (missing.length > 0) {
+        log('error', `Missing required environment variables: ${missing.join(', ')}`);
+        process.exit(1);
+    }
+    
+    if (!GOOGLE_AI_API_KEY) {
+        log('warn', 'GOOGLE_AI_API_KEY not set - AI chat functionality will be disabled');
+    } else {
+        log('info', 'Google AI Studio API Key configured successfully');
+        // 验证 API Key 格式（Google AI Studio API Key 通常以 AIza 开头）
+        if (!GOOGLE_AI_API_KEY.startsWith('AIza')) {
+            log('warn', 'GOOGLE_AI_API_KEY format may be incorrect (should start with "AIza")');
+        }
+    }
+    
+    log('info', 'Environment validation completed');
+}
+
+// 调用 Gemini API 的函数实现
+async function callGeminiAPI(messages) {
+    try {
+        const url = `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${GOOGLE_AI_API_KEY}`;
+        
+        // 构建请求体
+        const requestBody = {
+            contents: messages,
+            generationConfig: {
+                temperature: 0.7,
+                topK: 40,
+                topP: 0.95,
+                maxOutputTokens: 2048,
+            },
+            safetySettings: [
+                {
+                    category: "HARM_CATEGORY_HARASSMENT",
+                    threshold: "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    category: "HARM_CATEGORY_HATE_SPEECH",
+                    threshold: "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    threshold: "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    threshold: "BLOCK_MEDIUM_AND_ABOVE"
+                }
+            ]
+        };
+
+        log('debug', 'Calling Gemini API', { 
+            url: url.replace(GOOGLE_AI_API_KEY, '[REDACTED]'),
+            messagesCount: messages.length 
+        });
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            log('error', `Gemini API HTTP error: ${response.status}`, { 
+                status: response.status,
+                statusText: response.statusText,
+                errorBody: errorText
+            });
+            
+            // 提供更具体的错误信息
+            if (response.status === 403) {
+                throw new Error('API_KEY_INVALID: Google AI Studio API Key 无效或无权限');
+            } else if (response.status === 429) {
+                throw new Error('QUOTA_EXCEEDED: API 配额已用完，请等待重置');
+            } else if (response.status === 400) {
+                throw new Error('BAD_REQUEST: 请求格式错误或内容被安全过滤器阻止');
+            } else {
+                throw new Error(`HTTP_ERROR: ${response.status} - ${response.statusText}`);
+            }
+        }
+
+        const result = await response.json();
+        
+        // 检查 API 响应是否包含错误
+        if (result.error) {
+            log('error', 'Gemini API returned error', result.error);
+            throw new Error(`GEMINI_API_ERROR: ${result.error.message || 'Unknown API error'}`);
+        }
+
+        // 检查是否有有效的回复内容
+        if (!result.candidates || result.candidates.length === 0) {
+            log('warn', 'Gemini API returned no candidates', result);
+            throw new Error('NO_RESPONSE: Gemini API 没有返回有效回复');
+        }
+
+        // 检查内容是否被安全过滤器阻止
+        const candidate = result.candidates[0];
+        if (candidate.finishReason === 'SAFETY') {
+            log('warn', 'Content blocked by safety filters', candidate);
+            throw new Error('CONTENT_BLOCKED: 内容被安全过滤器阻止，请重新组织您的问题');
+        }
+
+        log('debug', 'Gemini API call successful', {
+            candidatesCount: result.candidates.length,
+            finishReason: candidate.finishReason
+        });
+
+        return result;
+
+    } catch (error) {
+        // 如果是我们抛出的错误，直接传递
+        if (error.message.includes('API_KEY_INVALID') || 
+            error.message.includes('QUOTA_EXCEEDED') || 
+            error.message.includes('BAD_REQUEST') ||
+            error.message.includes('CONTENT_BLOCKED') ||
+            error.message.includes('NO_RESPONSE')) {
+            throw error;
+        }
+
+        // 处理网络错误等其他错误
+        log('error', 'Unexpected error calling Gemini API', error);
+        
+        if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+            throw new Error('NETWORK_ERROR: 网络连接失败，请检查网络设置');
+        } else if (error.name === 'AbortError') {
+            throw new Error('TIMEOUT_ERROR: 请求超时，请稍后重试');
+        } else {
+            throw new Error(`UNEXPECTED_ERROR: ${error.message}`);
+        }
     }
 }
 
@@ -228,11 +353,11 @@ async function handleTextToSpeech(botToken, chatId, content) {
 async function handleAIChat(botToken, chatId, text) {
     log('info', `Processing AI chat for chat ${chatId}`, { text });
     
-    // 检查模型是否初始化成功
-    if (!geminiModel) {
-        log('error', `Gemini model not available for chat ${chatId}`);
+    // 检查 API Key 是否配置
+    if (!GOOGLE_AI_API_KEY) {
+        log('error', `Google AI API Key not configured for chat ${chatId}`);
         setImmediate(() => {
-            safeSendMessage(botToken, chatId, '❌ AI聊天功能暂时不可用，模型初始化失败。\n\n这可能是因为项目为新项目，需要等待Vertex AI服务完全激活。');
+            safeSendMessage(botToken, chatId, '❌ AI聊天功能暂时不可用。\n\n请检查 GOOGLE_AI_API_KEY 环境变量是否正确配置。');
         });
         return;
     }
@@ -240,17 +365,33 @@ async function handleAIChat(botToken, chatId, text) {
     try {
         await apiRequest(botToken, 'sendChatAction', { chat_id: chatId, action: 'typing' });
 
+        // 获取聊天历史
         const history = chatHistories.get(chatId) || [];
-        const contents = history.map(h => ({
-            role: h.role,
-            parts: [{ text: h.text }]
-        })).concat([{ role: 'user', parts: [{ text }] }]);
-
-        log('debug', `AI chat history length: ${history.length}`);
-        log('debug', `Using project: ${projectId}, region: ${region}`);
         
-        const result = await geminiModel.generateContent({ contents });
-        const reply = result.response?.candidates?.[0]?.content?.parts?.[0]?.text || '抱歉，我无法生成回复。';
+        // 构建消息数组，按照 Google AI Studio API 格式
+        const messages = [];
+        
+        // 添加历史对话
+        for (const msg of history) {
+            messages.push({
+                role: msg.role,
+                parts: [{ text: msg.text }]
+            });
+        }
+        
+        // 添加当前用户消息
+        messages.push({
+            role: 'user',
+            parts: [{ text: text }]
+        });
+        
+        log('debug', `AI chat history length: ${history.length}`);
+        
+        // 调用 Gemini API
+        const result = await callGeminiAPI(messages);
+        
+        // 提取回复内容
+        const reply = result.candidates?.[0]?.content?.parts?.[0]?.text || '抱歉，我无法生成回复。';
 
         await apiRequest(botToken, 'sendMessage', { chat_id: chatId, text: reply });
 
@@ -266,16 +407,18 @@ async function handleAIChat(botToken, chatId, text) {
         // 详细的错误信息
         let errorMessage = '❌ AI聊天暂时不可用';
         
-        if (error.message?.includes('403') || error.message?.includes('SERVICE_DISABLED')) {
-            errorMessage += '\n\n🆕 **新项目常见问题**：\n' +
-                           '• 新项目的Vertex AI可能需要24-48小时才能完全激活\n' +
-                           '• 建议等待一段时间后重试\n' +
-                           '• 或者尝试使用其他功能（翻译、语音识别等）\n\n' +
-                           '📝 如果问题持续，请检查：\n' +
-                           '• Google Cloud控制台中Vertex AI API是否启用\n' +
-                           '• 项目是否绑定了有效的付款方式';
-        } else if (error.message?.includes('quota')) {
-            errorMessage += '\n\n📊 配额不足，请稍后重试或检查配额设置。';
+        if (error.message?.includes('403') || error.message?.includes('API_KEY')) {
+            errorMessage += '\n\n🔑 API Key 问题：\n' +
+                           '• 请检查 GOOGLE_AI_API_KEY 是否正确\n' +
+                           '• 确保 API Key 有效且未过期';
+        } else if (error.message?.includes('429') || error.message?.includes('QUOTA')) {
+            errorMessage += '\n\n📊 配额超限：\n' +
+                           '• Google AI Studio 配额已用完\n' +
+                           '• 请等待配额重置或升级计划';
+        } else if (error.message?.includes('400')) {
+            errorMessage += '\n\n🚫 请求格式错误：\n' +
+                           '• 您的消息可能包含不支持的内容\n' +
+                           '• 请重新组织您的问题';
         } else {
             errorMessage += `\n\n🔍 错误详情：${error.message}`;
         }
@@ -389,12 +532,14 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         memoryUsage: process.memoryUsage(),
-        version: process.env.npm_package_version || '1.1.0',
+        version: process.env.npm_package_version || '1.2.0',
         chatHistories: chatHistories.size,
         environment: {
             nodeVersion: process.version,
             projectId: projectId || 'not-set',
-            botTokenConfigured: !!process.env.TELEGRAM_BOT_TOKEN
+            botTokenConfigured: !!process.env.TELEGRAM_BOT_TOKEN,
+            googleAiApiKeyConfigured: !!GOOGLE_AI_API_KEY,
+            geminiModel: GEMINI_MODEL
         }
     };
     
@@ -417,12 +562,17 @@ app.use((err, req, res, next) => {
     });
 });
 
+// 验证环境变量
+validateEnvironment();
+
 // 启动服务器
 app.listen(port, () => {
     log('info', `SpeakMate Telegram Bot started successfully`);
     log('info', `Server running on port ${port}`);
     log('info', `Project ID: ${projectId || 'not-set'}`);
     log('info', `Bot Token configured: ${!!process.env.TELEGRAM_BOT_TOKEN}`);
+    log('info', `Google AI API Key configured: ${!!GOOGLE_AI_API_KEY}`);
+    log('info', `Gemini Model: ${GEMINI_MODEL}`);
     log('info', `Node.js version: ${process.version}`);
     log('info', `Memory usage:`, process.memoryUsage());
 });

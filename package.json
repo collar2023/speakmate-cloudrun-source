@@ -1,6 +1,6 @@
 {
   "name": "speakmate-cloudrun",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "SpeakMate AI Telegram Bot on Google Cloud Run",
   "main": "index.js",
   "scripts": {
@@ -8,12 +8,11 @@
   },
   "dependencies": {
     "express": "^4.18.2",
+    "@google-cloud/translate": "^8.0.2",
+    "@google-cloud/speech": "^6.0.1", 
+    "@google-cloud/text-to-speech": "^5.0.1",
     "form-data": "^4.0.0",
-    "node-fetch": "^2.6.12",
-    "@google-cloud/translate": "^6.2.0",
-    "@google-cloud/speech": "^4.4.0",
-    "@google-cloud/text-to-speech": "^4.0.0",
-    "@google-cloud/vertex-ai": "https://github.com/googleapis/nodejs-vertex-ai.git"
+    "node-fetch": "^2.6.7"
   },
   "engines": {
     "node": ">=18"
