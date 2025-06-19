@@ -13,7 +13,7 @@
     "@google-cloud/translate": "^6.2.0",
     "@google-cloud/speech": "^4.4.0",
     "@google-cloud/text-to-speech": "^4.0.0",
-    "@google-cloud/vertex-ai": "^1.4.0"
+    "@google-cloud/vertex-ai": "github:googleapis/nodejs-vertex-ai"
   },
   "engines": {
     "node": ">=18"
