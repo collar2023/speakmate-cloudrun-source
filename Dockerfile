@@ -11,7 +11,7 @@ RUN groupadd -r nodeuser && useradd -r -g nodeuser nodeuser
 COPY package*.json ./
 
 # 安装依赖
-RUN npm ci --only=production && npm cache clean --force
+RUN npm install --omit=dev && npm cache clean --force
 
 # 复制应用代码
 COPY index.js ./
